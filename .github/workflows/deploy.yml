@@ -14,10 +14,10 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         
-      - name: Set up JDK 19
-        uses: actions/setup-java@v3
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
         with:
-          java-version: '19'
+          java-version: '17'
           distribution: 'temurin'
           
       - name: Cache Gradle packages
@@ -54,31 +54,57 @@ jobs:
           echo "jar_file=$JAR_FILE" >> $GITHUB_OUTPUT
           echo "jar_name=$(basename $JAR_FILE)" >> $GITHUB_OUTPUT
         
-      - name: Deploy to EC2
+      - name: Deploy to EC2 - Stop Services
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.EC2_HOST }}
           username: ${{ secrets.EC2_USERNAME }}
           key: ${{ secrets.EC2_SSH_KEY }}
           passphrase: ${{ secrets.SSH_PASSPHRASE }}
-          timeout: 30s
-          command_timeout: 10m
+          timeout: 60s
+          command_timeout: 5m
           script: |
             set -e
             
             echo "🔍 System Information:"
             echo "Current user: $(whoami)"
             echo "Current directory: $(pwd)"
-            echo "Java version check:"
+            echo "Available memory:"
+            free -h
+            echo "Disk space:"
+            df -h
+            
+            echo "☕ Java version check:"
             java -version 2>&1 || echo "Java not found"
             
             echo "⏹️ Stopping existing application..."
-            # Stop any existing Spring Boot application
+            
+            # Check if app.pid exists and stop the process
+            if [ -f "/home/deploy/app.pid" ]; then
+              OLD_PID=$(cat /home/deploy/app.pid)
+              if kill -0 $OLD_PID 2>/dev/null; then
+                echo "🛑 Stopping application with PID: $OLD_PID"
+                kill -TERM $OLD_PID
+                sleep 10
+                # Force kill if still running
+                if kill -0 $OLD_PID 2>/dev/null; then
+                  echo "⚡ Force killing application"
+                  kill -KILL $OLD_PID
+                fi
+              fi
+              rm -f /home/deploy/app.pid
+            fi
+            
+            # Stop any remaining Java processes
             pkill -f "java.*\.jar" || echo "No existing JAR process found"
-            pkill -f "java.*bootRun" || echo "No existing bootRun process found"
             
             # Kill any process using port 8080
-            lsof -ti:8080 | xargs kill -9 2>/dev/null || echo "No process on port 8080"
+            PORT_PID=$(lsof -ti:8080 2>/dev/null || echo "")
+            if [ ! -z "$PORT_PID" ]; then
+              echo "🔌 Killing process on port 8080: $PORT_PID"
+              kill -9 $PORT_PID
+            fi
+            
             sleep 5
             
             echo "💾 Creating backup..."
@@ -87,6 +113,10 @@ jobs:
               BACKUP_FILE="/home/deploy/backups/app-backup-$(date +%Y%m%d-%H%M%S).jar"
               cp /home/deploy/app.jar "$BACKUP_FILE"
               echo "✅ Backup created: $BACKUP_FILE"
+              
+              # Keep only last 5 backups
+              cd /home/deploy/backups
+              ls -t app-backup-*.jar | tail -n +6 | xargs rm -f 2>/dev/null || true
             else
               echo "ℹ️ No existing application to backup"
             fi
@@ -94,6 +124,11 @@ jobs:
             echo "📁 Preparing deployment directory..."
             mkdir -p /home/deploy
             cd /home/deploy
+            
+            # Clean up old logs
+            if [ -f "application.log" ]; then
+              mv application.log "application-$(date +%Y%m%d-%H%M%S).log"
+            fi
             
             echo "⚙️ Creating application configuration..."
             cat > application.properties << 'EOF'
@@ -111,20 +146,28 @@ jobs:
             
             # Server Configuration
             server.port=8080
+            server.servlet.context-path=/
             
             # Actuator Configuration
-            management.endpoints.web.exposure.include=health,info,env
+            management.endpoints.web.exposure.include=health,info,env,metrics
             management.endpoint.health.show-details=always
             management.server.port=8081
             
             # Logging Configuration
             logging.level.root=INFO
             logging.level.org.springframework=INFO
+            logging.level.org.springframework.web=DEBUG
             logging.file.name=/home/deploy/application.log
             logging.pattern.file=%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level %logger{36} - %msg%n
+            logging.pattern.console=%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level %logger{36} - %msg%n
+            
+            # JVM Configuration
+            spring.jpa.open-in-view=false
             EOF
             
-            echo "✅ Configuration created"
+            echo "✅ Configuration created successfully"
+            echo "📋 Configuration file contents:"
+            cat application.properties | grep -v password
             
       - name: Copy JAR to EC2
         uses: appleboy/scp-action@v0.1.7
@@ -135,8 +178,9 @@ jobs:
           passphrase: ${{ secrets.SSH_PASSPHRASE }}
           source: ${{ steps.jar.outputs.jar_file }}
           target: /home/deploy/
-          timeout: 30s
-          debug: true
+          timeout: 60s
+          debug: false
+          overwrite: true
           
       - name: Start Application
         uses: appleboy/ssh-action@v1.0.3
@@ -145,7 +189,7 @@ jobs:
           username: ${{ secrets.EC2_USERNAME }}
           key: ${{ secrets.EC2_SSH_KEY }}
           passphrase: ${{ secrets.SSH_PASSPHRASE }}
-          timeout: 30s
+          timeout: 60s
           command_timeout: 10m
           script: |
             set -e
@@ -155,12 +199,13 @@ jobs:
             ls -la /home/deploy/
             
             echo "🔍 Looking for JAR file..."
-            JAR_FILE=$(find /home/deploy -name "*.jar" -not -path "*/backups/*" | head -1)
+            # Find the uploaded JAR file
+            JAR_FILE=$(find /home/deploy -maxdepth 2 -name "*.jar" -not -path "*/backups/*" | head -1)
             
             if [ -z "$JAR_FILE" ]; then
               echo "❌ No JAR file found in deployment directory!"
               echo "Directory contents:"
-              ls -la /home/deploy/
+              find /home/deploy -type f -name "*.jar" 2>/dev/null || echo "No JAR files found"
               exit 1
             fi
             
@@ -176,57 +221,101 @@ jobs:
             ls -lh app.jar
             file app.jar
             
+            # Verify JAR integrity
+            jar tf app.jar > /dev/null && echo "✅ JAR file is valid" || {
+              echo "❌ JAR file is corrupted"
+              exit 1
+            }
+            
             echo "🚀 Starting application..."
-            # Start the application with the external config
-            nohup java -jar app.jar \
+            
+            # Create startup script for better process management
+            cat > start_app.sh << 'EOF_SCRIPT'
+            #!/bin/bash
+            cd /home/deploy
+            
+            # Set JVM options for better performance
+            export JAVA_OPTS="-Xms512m -Xmx1024m -XX:+UseG1GC -XX:G1HeapRegionSize=16m -XX:+UseStringDeduplication"
+            
+            # Start the application
+            exec java $JAVA_OPTS \
+              -jar app.jar \
               --spring.config.location=file:./application.properties \
               --server.port=8080 \
-              > application.log 2>&1 &
+              --logging.file.name=./application.log
+            EOF_SCRIPT
             
+            chmod +x start_app.sh
+            
+            # Start the application in background
+            nohup ./start_app.sh > startup.log 2>&1 &
             APP_PID=$!
+            
             echo "📋 Application started with PID: $APP_PID"
             echo $APP_PID > app.pid
             
             echo "⏳ Waiting for application to start..."
-            for i in {1..18}; do
-              echo "🔍 Health check attempt $i/18 ($(date))..."
-              sleep 10
+            sleep 15
+            
+            # Check if process is still running
+            if ! kill -0 $APP_PID 2>/dev/null; then
+              echo "❌ Application process died immediately!"
+              echo "📋 Startup logs:"
+              cat startup.log 2>/dev/null || echo "No startup log found"
+              echo "📋 Application logs:"
+              tail -n 50 application.log 2>/dev/null || echo "No application log found"
+              exit 1
+            fi
+            
+            # Health check loop
+            for i in {1..24}; do
+              echo "🔍 Health check attempt $i/24 ($(date))..."
+              sleep 15
               
               # Check if process is still running
               if ! kill -0 $APP_PID 2>/dev/null; then
-                echo "❌ Application process died!"
+                echo "❌ Application process died during startup!"
                 echo "📋 Application logs:"
-                tail -n 50 application.log
+                tail -n 100 application.log 2>/dev/null || echo "No application log found"
                 exit 1
               fi
               
               # Check health endpoint
-              if curl -f -m 5 http://localhost:8080/actuator/health 2>/dev/null; then
+              if curl -f -m 10 http://localhost:8080/actuator/health 2>/dev/null; then
                 echo "✅ Application started successfully!"
                 echo "📊 Application health status:"
-                curl -s http://localhost:8080/actuator/health | python3 -m json.tool 2>/dev/null || echo "Health endpoint responded successfully"
+                curl -s http://localhost:8080/actuator/health | python3 -m json.tool 2>/dev/null || curl -s http://localhost:8080/actuator/health
+                echo ""
+                echo "📊 System resources after startup:"
+                free -h
                 echo "🎉 Deployment completed successfully!"
                 exit 0
               else
-                echo "⌛ Application not ready yet..."
-                if [ $i -eq 9 ]; then
-                  echo "📋 Mid-deployment logs check (last 30 lines):"
-                  tail -n 30 application.log
+                echo "⌛ Application not ready yet... (attempt $i/24)"
+                if [ $((i % 6)) -eq 0 ]; then
+                  echo "📋 Progress check - last 20 lines of log:"
+                  tail -n 20 application.log 2>/dev/null || echo "No application log yet"
                 fi
               fi
             done
             
-            echo "❌ Application failed to start within 3 minutes"
-            echo "📋 Final application logs (last 100 lines):"
-            tail -n 100 application.log
+            echo "❌ Application failed to start within 6 minutes"
+            echo "📋 Final application logs (last 200 lines):"
+            tail -n 200 application.log 2>/dev/null || echo "No application log found"
+            echo ""
+            echo "📋 Startup logs:"
+            cat startup.log 2>/dev/null || echo "No startup log found"
             echo ""
             echo "📊 System resources:"
             free -h
             df -h
             echo ""
             echo "🔍 Process status:"
-            ps aux | grep -E "(java)" | grep -v grep
+            ps aux | grep -E "(java|app)" | grep -v grep
             echo ""
             echo "🌐 Network status:"
             netstat -tulpn | grep :8080 || echo "Port 8080 not in use"
+            echo ""
+            echo "📂 Directory contents:"
+            ls -la /home/deploy/
             exit 1
