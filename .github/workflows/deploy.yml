@@ -7,7 +7,7 @@ on:
     branches: [main, master]
 
 jobs:
-  deploy:
+  build-and-deploy:
     runs-on: ubuntu-latest
     
     steps:
@@ -37,8 +37,22 @@ jobs:
         working-directory: ./app
         
       - name: Build application
-        run: ./gradlew build -x test
+        run: ./gradlew clean build -x test
         working-directory: ./app
+        
+      - name: Find JAR file
+        id: jar
+        run: |
+          echo "🔍 Looking for JAR files..."
+          ls -la ./app/build/libs/
+          JAR_FILE=$(find ./app/build/libs -name "*.jar" -not -name "*-plain.jar" | head -1)
+          if [ -z "$JAR_FILE" ]; then
+            echo "❌ No JAR file found!"
+            exit 1
+          fi
+          echo "✅ Found JAR: $JAR_FILE"
+          echo "jar_file=$JAR_FILE" >> $GITHUB_OUTPUT
+          echo "jar_name=$(basename $JAR_FILE)" >> $GITHUB_OUTPUT
         
       - name: Deploy to EC2
         uses: appleboy/ssh-action@v1.0.3
@@ -47,49 +61,172 @@ jobs:
           username: ${{ secrets.EC2_USERNAME }}
           key: ${{ secrets.EC2_SSH_KEY }}
           passphrase: ${{ secrets.SSH_PASSPHRASE }}
+          timeout: 30s
+          command_timeout: 10m
           script: |
+            set -e
+            
+            echo "🔍 System Information:"
+            echo "Current user: $(whoami)"
+            echo "Current directory: $(pwd)"
+            echo "Java version check:"
+            java -version 2>&1 || echo "Java not found"
+            
             echo "⏹️ Stopping existing application..."
-            pkill -f "java.*bootRun" || true
+            # Stop any existing Spring Boot application
+            pkill -f "java.*\.jar" || echo "No existing JAR process found"
+            pkill -f "java.*bootRun" || echo "No existing bootRun process found"
+            
+            # Kill any process using port 8080
+            lsof -ti:8080 | xargs kill -9 2>/dev/null || echo "No process on port 8080"
             sleep 5
             
             echo "💾 Creating backup..."
-            if [ -d "/home/deploy/notification-dispatch-system" ]; then
-              cp -r /home/deploy/notification-dispatch-system /home/deploy/backup-$(date +%Y%m%d-%H%M%S)
-            fi
-            
-            echo "📥 Pulling latest code..."
-            cd /home/deploy
-            if [ -d "notification-dispatch-system" ]; then
-              cd notification-dispatch-system
-              git pull origin main
+            mkdir -p /home/deploy/backups
+            if [ -f "/home/deploy/app.jar" ]; then
+              BACKUP_FILE="/home/deploy/backups/app-backup-$(date +%Y%m%d-%H%M%S).jar"
+              cp /home/deploy/app.jar "$BACKUP_FILE"
+              echo "✅ Backup created: $BACKUP_FILE"
             else
-              git clone https://github.com/${{ github.repository }}.git notification-dispatch-system
-              cd notification-dispatch-system
+              echo "ℹ️ No existing application to backup"
             fi
             
-            echo "🔨 Building application..."
-            cd app
-            chmod +x gradlew
-            ./gradlew clean build -x test
+            echo "📁 Preparing deployment directory..."
+            mkdir -p /home/deploy
+            cd /home/deploy
             
-            echo "⚙️ Updating configuration..."
-            cat << 'EOF' > src/main/resources/application.properties
+            echo "⚙️ Creating application configuration..."
+            cat > application.properties << 'EOF'
+            # Database Configuration
             spring.datasource.url=jdbc:postgresql://localhost:5432/notifications
             spring.datasource.username=batch_user
             spring.datasource.password=${{ secrets.DB_PASSWORD }}
-            # ... rest of configuration
+            spring.datasource.driver-class-name=org.postgresql.Driver
+            
+            # JPA Configuration
+            spring.jpa.hibernate.ddl-auto=update
+            spring.jpa.show-sql=false
+            spring.jpa.properties.hibernate.format_sql=true
+            spring.jpa.database-platform=org.hibernate.dialect.PostgreSQLDialect
+            
+            # Server Configuration
+            server.port=8080
+            
+            # Actuator Configuration
+            management.endpoints.web.exposure.include=health,info,env
+            management.endpoint.health.show-details=always
+            management.server.port=8081
+            
+            # Logging Configuration
+            logging.level.root=INFO
+            logging.level.org.springframework=INFO
+            logging.file.name=/home/deploy/application.log
+            logging.pattern.file=%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level %logger{36} - %msg%n
             EOF
             
-            echo "🚀 Starting application..."
-            nohup ./gradlew bootRun > /home/deploy/app.log 2>&1 &
+            echo "✅ Configuration created"
             
-            echo "⏳ Waiting for application to start..."
-            sleep 30
+      - name: Copy JAR to EC2
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USERNAME }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          passphrase: ${{ secrets.SSH_PASSPHRASE }}
+          source: ${{ steps.jar.outputs.jar_file }}
+          target: /home/deploy/
+          timeout: 30s
+          debug: true
+          
+      - name: Start Application
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USERNAME }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          passphrase: ${{ secrets.SSH_PASSPHRASE }}
+          timeout: 30s
+          command_timeout: 10m
+          script: |
+            set -e
+            cd /home/deploy
             
-            if curl -f http://localhost:8080/actuator/health 2>/dev/null; then
-              echo "✅ Application started successfully!"
-            else
-              echo "❌ Application failed to start. Checking logs..."
-              tail -n 50 /home/deploy/app.log
+            echo "📋 Checking deployment directory..."
+            ls -la /home/deploy/
+            
+            echo "🔍 Looking for JAR file..."
+            JAR_FILE=$(find /home/deploy -name "*.jar" -not -path "*/backups/*" | head -1)
+            
+            if [ -z "$JAR_FILE" ]; then
+              echo "❌ No JAR file found in deployment directory!"
+              echo "Directory contents:"
+              ls -la /home/deploy/
               exit 1
             fi
+            
+            echo "✅ Found JAR file: $JAR_FILE"
+            
+            # Rename to app.jar for consistency
+            if [ "$(basename $JAR_FILE)" != "app.jar" ]; then
+              echo "📝 Renaming JAR to app.jar..."
+              mv "$JAR_FILE" app.jar
+            fi
+            
+            echo "📊 JAR file info:"
+            ls -lh app.jar
+            file app.jar
+            
+            echo "🚀 Starting application..."
+            # Start the application with the external config
+            nohup java -jar app.jar \
+              --spring.config.location=file:./application.properties \
+              --server.port=8080 \
+              > application.log 2>&1 &
+            
+            APP_PID=$!
+            echo "📋 Application started with PID: $APP_PID"
+            echo $APP_PID > app.pid
+            
+            echo "⏳ Waiting for application to start..."
+            for i in {1..18}; do
+              echo "🔍 Health check attempt $i/18 ($(date))..."
+              sleep 10
+              
+              # Check if process is still running
+              if ! kill -0 $APP_PID 2>/dev/null; then
+                echo "❌ Application process died!"
+                echo "📋 Application logs:"
+                tail -n 50 application.log
+                exit 1
+              fi
+              
+              # Check health endpoint
+              if curl -f -m 5 http://localhost:8080/actuator/health 2>/dev/null; then
+                echo "✅ Application started successfully!"
+                echo "📊 Application health status:"
+                curl -s http://localhost:8080/actuator/health | python3 -m json.tool 2>/dev/null || echo "Health endpoint responded successfully"
+                echo "🎉 Deployment completed successfully!"
+                exit 0
+              else
+                echo "⌛ Application not ready yet..."
+                if [ $i -eq 9 ]; then
+                  echo "📋 Mid-deployment logs check (last 30 lines):"
+                  tail -n 30 application.log
+                fi
+              fi
+            done
+            
+            echo "❌ Application failed to start within 3 minutes"
+            echo "📋 Final application logs (last 100 lines):"
+            tail -n 100 application.log
+            echo ""
+            echo "📊 System resources:"
+            free -h
+            df -h
+            echo ""
+            echo "🔍 Process status:"
+            ps aux | grep -E "(java)" | grep -v grep
+            echo ""
+            echo "🌐 Network status:"
+            netstat -tulpn | grep :8080 || echo "Port 8080 not in use"
+            exit 1
