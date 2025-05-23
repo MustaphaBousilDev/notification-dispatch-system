@@ -43,10 +43,16 @@ jobs:
       - name: Find JAR file
         id: jar
         run: |
+          echo "🔍 Looking for JAR files..."
+          ls -la ./app/build/libs/
           JAR_FILE=$(find ./app/build/libs -name "*.jar" -not -name "*-plain.jar" | head -1)
+          if [ -z "$JAR_FILE" ]; then
+            echo "❌ No JAR file found!"
+            exit 1
+          fi
+          echo "✅ Found JAR: $JAR_FILE"
           echo "jar_file=$JAR_FILE" >> $GITHUB_OUTPUT
           echo "jar_name=$(basename $JAR_FILE)" >> $GITHUB_OUTPUT
-          ls -la ./app/build/libs/
         
       - name: Deploy to EC2
         uses: appleboy/ssh-action@v1.0.3
@@ -128,8 +134,9 @@ jobs:
           key: ${{ secrets.EC2_SSH_KEY }}
           passphrase: ${{ secrets.SSH_PASSPHRASE }}
           source: ${{ steps.jar.outputs.jar_file }}
-          target: /home/deploy/app.jar
-          strip_components: 3
+          target: /home/deploy/
+          timeout: 30s
+          debug: true
           
       - name: Start Application
         uses: appleboy/ssh-action@v1.0.3
@@ -144,11 +151,25 @@ jobs:
             set -e
             cd /home/deploy
             
-            echo "📋 Verifying JAR file..."
-            if [ ! -f "app.jar" ]; then
-              echo "❌ JAR file not found!"
+            echo "📋 Checking deployment directory..."
+            ls -la /home/deploy/
+            
+            echo "🔍 Looking for JAR file..."
+            JAR_FILE=$(find /home/deploy -name "*.jar" -not -path "*/backups/*" | head -1)
+            
+            if [ -z "$JAR_FILE" ]; then
+              echo "❌ No JAR file found in deployment directory!"
+              echo "Directory contents:"
               ls -la /home/deploy/
               exit 1
+            fi
+            
+            echo "✅ Found JAR file: $JAR_FILE"
+            
+            # Rename to app.jar for consistency
+            if [ "$(basename $JAR_FILE)" != "app.jar" ]; then
+              echo "📝 Renaming JAR to app.jar..."
+              mv "$JAR_FILE" app.jar
             fi
             
             echo "📊 JAR file info:"
