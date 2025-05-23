@@ -7,17 +7,17 @@ on:
     branches: [main, master]
 
 jobs:
-  deploy:
+  build-and-deploy:
     runs-on: ubuntu-latest
     
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         
-      - name: Set up JDK 17
-        uses: actions/setup-java@v4
+      - name: Set up JDK 19
+        uses: actions/setup-java@v3
         with:
-          java-version: '17'
+          java-version: '19'
           distribution: 'temurin'
           
       - name: Cache Gradle packages
@@ -37,8 +37,16 @@ jobs:
         working-directory: ./app
         
       - name: Build application
-        run: ./gradlew build -x test
+        run: ./gradlew clean build -x test
         working-directory: ./app
+        
+      - name: Find JAR file
+        id: jar
+        run: |
+          JAR_FILE=$(find ./app/build/libs -name "*.jar" -not -name "*-plain.jar" | head -1)
+          echo "jar_file=$JAR_FILE" >> $GITHUB_OUTPUT
+          echo "jar_name=$(basename $JAR_FILE)" >> $GITHUB_OUTPUT
+          ls -la ./app/build/libs/
         
       - name: Deploy to EC2
         uses: appleboy/ssh-action@v1.0.3
@@ -48,73 +56,41 @@ jobs:
           key: ${{ secrets.EC2_SSH_KEY }}
           passphrase: ${{ secrets.SSH_PASSPHRASE }}
           timeout: 30s
-          command_timeout: 15m
+          command_timeout: 10m
           script: |
-            set -e  # Exit on any error
+            set -e
             
-            echo "🔍 Current working directory: $(pwd)"
-            echo "👤 Current user: $(whoami)"
-            echo "📁 Home directory contents:"
-            ls -la /home/deploy/ || echo "Deploy directory doesn't exist yet"
+            echo "🔍 System Information:"
+            echo "Current user: $(whoami)"
+            echo "Current directory: $(pwd)"
+            echo "Java version check:"
+            java -version 2>&1 || echo "Java not found"
             
             echo "⏹️ Stopping existing application..."
-            pkill -f "java.*bootRun" || echo "No existing Java process found"
-            pkill -f "gradle.*bootRun" || echo "No existing Gradle process found"
+            # Stop any existing Spring Boot application
+            pkill -f "java.*\.jar" || echo "No existing JAR process found"
+            pkill -f "java.*bootRun" || echo "No existing bootRun process found"
+            
+            # Kill any process using port 8080
+            lsof -ti:8080 | xargs kill -9 2>/dev/null || echo "No process on port 8080"
             sleep 5
             
             echo "💾 Creating backup..."
-            if [ -d "/home/deploy/notification-dispatch-system" ]; then
-              BACKUP_DIR="/home/deploy/backup-$(date +%Y%m%d-%H%M%S)"
-              echo "Creating backup at: $BACKUP_DIR"
-              cp -r /home/deploy/notification-dispatch-system "$BACKUP_DIR"
-              echo "✅ Backup created successfully"
+            mkdir -p /home/deploy/backups
+            if [ -f "/home/deploy/app.jar" ]; then
+              BACKUP_FILE="/home/deploy/backups/app-backup-$(date +%Y%m%d-%H%M%S).jar"
+              cp /home/deploy/app.jar "$BACKUP_FILE"
+              echo "✅ Backup created: $BACKUP_FILE"
             else
               echo "ℹ️ No existing application to backup"
             fi
             
-            echo "📥 Pulling latest code..."
+            echo "📁 Preparing deployment directory..."
+            mkdir -p /home/deploy
             cd /home/deploy
             
-            if [ -d "notification-dispatch-system" ]; then
-              echo "📂 Directory exists, pulling latest changes..."
-              cd notification-dispatch-system
-              git status
-              git fetch origin main
-              git reset --hard origin/main
-              echo "✅ Code updated successfully"
-            else
-              echo "📁 Cloning repository..."
-              git clone https://github.com/MustaphaBousilDev/notification-dispatch-system.git notification-dispatch-system
-              cd notification-dispatch-system
-              echo "✅ Repository cloned successfully"
-            fi
-            
-            echo "🔨 Building application..."
-            cd app
-            ls -la  # Check if gradlew exists
-            
-            if [ ! -f "gradlew" ]; then
-              echo "❌ gradlew not found in app directory"
-              echo "📁 Current directory contents:"
-              ls -la
-              exit 1
-            fi
-            
-            chmod +x gradlew
-            echo "🏗️ Running clean build..."
-            ./gradlew clean build -x test --info
-            
-            if [ $? -ne 0 ]; then
-              echo "❌ Build failed"
-              exit 1
-            fi
-            
-            echo "✅ Build completed successfully"
-            
-            echo "⚙️ Updating configuration..."
-            mkdir -p src/main/resources
-            
-            cat > src/main/resources/application.properties << 'EOF'
+            echo "⚙️ Creating application configuration..."
+            cat > application.properties << 'EOF'
             # Database Configuration
             spring.datasource.url=jdbc:postgresql://localhost:5432/notifications
             spring.datasource.username=batch_user
@@ -131,52 +107,105 @@ jobs:
             server.port=8080
             
             # Actuator Configuration
-            management.endpoints.web.exposure.include=health,info
+            management.endpoints.web.exposure.include=health,info,env
             management.endpoint.health.show-details=always
+            management.server.port=8081
             
             # Logging Configuration
             logging.level.root=INFO
-            logging.level.com.yourpackage=DEBUG
-            logging.file.name=/home/deploy/app.log
+            logging.level.org.springframework=INFO
+            logging.file.name=/home/deploy/application.log
+            logging.pattern.file=%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level %logger{36} - %msg%n
             EOF
             
-            echo "✅ Configuration updated"
+            echo "✅ Configuration created"
+            
+      - name: Copy JAR to EC2
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USERNAME }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          passphrase: ${{ secrets.SSH_PASSPHRASE }}
+          source: ${{ steps.jar.outputs.jar_file }}
+          target: /home/deploy/app.jar
+          strip_components: 3
+          
+      - name: Start Application
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USERNAME }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          passphrase: ${{ secrets.SSH_PASSPHRASE }}
+          timeout: 30s
+          command_timeout: 10m
+          script: |
+            set -e
+            cd /home/deploy
+            
+            echo "📋 Verifying JAR file..."
+            if [ ! -f "app.jar" ]; then
+              echo "❌ JAR file not found!"
+              ls -la /home/deploy/
+              exit 1
+            fi
+            
+            echo "📊 JAR file info:"
+            ls -lh app.jar
+            file app.jar
             
             echo "🚀 Starting application..."
-            # Kill any remaining processes on port 8080
-            lsof -ti:8080 | xargs kill -9 2>/dev/null || echo "No process on port 8080"
-            sleep 2
+            # Start the application with the external config
+            nohup java -jar app.jar \
+              --spring.config.location=file:./application.properties \
+              --server.port=8080 \
+              > application.log 2>&1 &
             
-            # Start the application
-            nohup ./gradlew bootRun > /home/deploy/app.log 2>&1 &
             APP_PID=$!
             echo "📋 Application started with PID: $APP_PID"
+            echo $APP_PID > app.pid
             
             echo "⏳ Waiting for application to start..."
-            for i in {1..12}; do
-              echo "🔍 Health check attempt $i/12..."
+            for i in {1..18}; do
+              echo "🔍 Health check attempt $i/18 ($(date))..."
               sleep 10
               
-              if curl -f http://localhost:8080/actuator/health 2>/dev/null; then
+              # Check if process is still running
+              if ! kill -0 $APP_PID 2>/dev/null; then
+                echo "❌ Application process died!"
+                echo "📋 Application logs:"
+                tail -n 50 application.log
+                exit 1
+              fi
+              
+              # Check health endpoint
+              if curl -f -m 5 http://localhost:8080/actuator/health 2>/dev/null; then
                 echo "✅ Application started successfully!"
                 echo "📊 Application health status:"
-                curl -s http://localhost:8080/actuator/health | python3 -m json.tool || echo "Health endpoint responded"
+                curl -s http://localhost:8080/actuator/health | python3 -m json.tool 2>/dev/null || echo "Health endpoint responded successfully"
+                echo "🎉 Deployment completed successfully!"
                 exit 0
               else
-                echo "⌛ Application not ready yet, waiting..."
-                if [ $i -eq 6 ]; then
-                  echo "📋 Checking application logs (last 20 lines):"
-                  tail -n 20 /home/deploy/app.log
+                echo "⌛ Application not ready yet..."
+                if [ $i -eq 9 ]; then
+                  echo "📋 Mid-deployment logs check (last 30 lines):"
+                  tail -n 30 application.log
                 fi
               fi
             done
             
-            echo "❌ Application failed to start within 2 minutes"
-            echo "📋 Final application logs (last 50 lines):"
-            tail -n 50 /home/deploy/app.log
+            echo "❌ Application failed to start within 3 minutes"
+            echo "📋 Final application logs (last 100 lines):"
+            tail -n 100 application.log
+            echo ""
             echo "📊 System resources:"
             free -h
             df -h
+            echo ""
             echo "🔍 Process status:"
-            ps aux | grep -E "(java|gradle)" | grep -v grep
+            ps aux | grep -E "(java)" | grep -v grep
+            echo ""
+            echo "🌐 Network status:"
+            netstat -tulpn | grep :8080 || echo "Port 8080 not in use"
             exit 1
