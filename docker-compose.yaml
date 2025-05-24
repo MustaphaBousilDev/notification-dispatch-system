@@ -1,0 +1,91 @@
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: notifications-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: notifications
+      POSTGRES_USER: batch_user
+      POSTGRES_PASSWORD: mugiwara1032
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    networks:
+      - app-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U batch_user -d notifications"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # Spring Boot Application
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: notifications-app
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # Database Configuration
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/notifications
+      SPRING_DATASOURCE_USERNAME: batch_user
+      SPRING_DATASOURCE_PASSWORD: mugiwara1032
+      SPRING_DATASOURCE_DRIVER_CLASS_NAME: org.postgresql.Driver
+      
+      # JPA Configuration
+      SPRING_JPA_HIBERNATE_DDL_AUTO: update
+      SPRING_JPA_SHOW_SQL: false
+      SPRING_JPA_PROPERTIES_HIBERNATE_FORMAT_SQL: true
+      SPRING_JPA_DATABASE_PLATFORM: org.hibernate.dialect.PostgreSQLDialect
+      
+      # Server Configuration
+      SERVER_PORT: 8080
+      
+      # Actuator Configuration
+      MANAGEMENT_ENDPOINTS_WEB_EXPOSURE_INCLUDE: health,info,env,metrics
+      MANAGEMENT_ENDPOINT_HEALTH_SHOW_DETAILS: always
+      MANAGEMENT_ENDPOINT_HEALTH_PROBES_ENABLED: true
+      
+      # Logging Configuration
+      LOGGING_LEVEL_ROOT: INFO
+      LOGGING_LEVEL_ORG_SPRINGFRAMEWORK: INFO
+      LOGGING_LEVEL_ORG_SPRINGFRAMEWORK_BATCH: INFO
+      LOGGING_FILE_NAME: /app/logs/application.log
+      
+      # Spring Batch Configuration
+      SPRING_BATCH_JOB_ENABLED: false
+      SPRING_BATCH_JDBC_INITIALIZE_SCHEMA: always
+      
+      # Application Profile
+      SPRING_PROFILES_ACTIVE: production
+    ports:
+      - "8080:8080"
+    volumes:
+      - app_logs:/app/logs
+    networks:
+      - app-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/actuator/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 90s
+
+# Volumes for data persistence
+volumes:
+  postgres_data:
+    driver: local
+  app_logs:
+    driver: local
+
+# Network for container communication
+networks:
+  app-network:
+    driver: bridge

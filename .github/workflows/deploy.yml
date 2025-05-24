@@ -1,4 +1,4 @@
-name: CI/CD Pipeline
+name: Docker CI/CD Pipeline
 
 on:
   push:
@@ -6,183 +6,249 @@ on:
   pull_request:
     branches: [main, master]
 
+env:
+  IMAGE_NAME: notifications-app
+  CONTAINER_NAME: notifications-app
+
 jobs:
-  build-and-deploy:
+  test:
     runs-on: ubuntu-latest
+    name: 🧪 Test Application
     
     steps:
-      - name: Checkout repository
+      - name: 📥 Checkout repository
         uses: actions/checkout@v4
         
-      - name: Set up JDK 17
+      - name: ☕ Set up JDK 17
         uses: actions/setup-java@v4
         with:
           java-version: '17'
           distribution: 'temurin'
           
-      - name: Cache Gradle packages
+      - name: 📦 Cache Gradle packages
         uses: actions/cache@v3
         with:
           path: |
             ~/.gradle/caches
             ~/.gradle/wrapper
           key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
           
-      - name: Make gradlew executable
+      - name: 🔧 Make gradlew executable
         run: chmod +x ./gradlew
         working-directory: ./app
         
-      - name: Run tests
+      - name: 🧪 Run tests
         run: ./gradlew test
         working-directory: ./app
         
-      - name: Build application
+      - name: 📊 Publish test results
+        uses: dorny/test-reporter@v1
+        if: success() || failure()
+        with:
+          name: 'Test Results'
+          path: 'app/build/test-results/test/*.xml'
+          reporter: java-junit
+
+  build-and-deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    name: 🚀 Build & Deploy
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+    
+    steps:
+      - name: 📥 Checkout repository
+        uses: actions/checkout@v4
+
+      - name: ☕ Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: 📦 Cache Gradle packages
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      - name: 🔧 Make gradlew executable
+        run: chmod +x ./gradlew
+        working-directory: ./app
+
+      - name: 🏗️ Build application
         run: ./gradlew clean build -x test
         working-directory: ./app
-        
-      - name: Find JAR file
-        id: jar
+
+      - name: 🔍 Verify JAR and PostgreSQL driver
         run: |
-          echo "🔍 Looking for JAR files..."
+          echo "📋 Checking built JAR files..."
           ls -la ./app/build/libs/
-          JAR_FILE=$(find ./app/build/libs -name "*.jar" -not -name "*-plain.jar" | head -1)
-          if [ -z "$JAR_FILE" ]; then
-            echo "❌ No JAR file found!"
+          
+          echo "🔍 Verifying PostgreSQL driver is included..."
+          jar tf ./app/build/libs/*.jar | grep postgresql || {
+            echo "❌ PostgreSQL driver not found in JAR!"
+            echo "📋 JAR contents preview:"
+            jar tf ./app/build/libs/*.jar | head -20
             exit 1
+          }
+          echo "✅ PostgreSQL driver found in JAR"
+
+      - name: 📋 Create deployment files
+        run: |
+          # Create environment file for deployment
+          cat > .env << EOF
+          DB_PASSWORD=${{ secrets.DB_PASSWORD }}
+          SPRING_PROFILE=production
+          EOF
+          
+          # Create deployment script
+          cat > deploy.sh << 'EOF'
+          #!/bin/bash
+          set -e
+          
+          echo "🐳 Starting Docker deployment process..."
+          
+          # Colors for output
+          GREEN='\033[0;32m'
+          YELLOW='\033[1;33m'
+          RED='\033[0;31m'
+          NC='\033[0m'
+          
+          print_status() { echo -e "${GREEN}[INFO]${NC} $1"; }
+          print_warning() { echo -e "${YELLOW}[WARNING]${NC} $1"; }
+          print_error() { echo -e "${RED}[ERROR]${NC} $1"; }
+          
+          # Check Docker is available
+          if ! command -v docker &> /dev/null; then
+              print_error "Docker is not installed!"
+              exit 1
           fi
-          echo "✅ Found JAR: $JAR_FILE"
-          echo "jar_file=$JAR_FILE" >> $GITHUB_OUTPUT
-          echo "jar_name=$(basename $JAR_FILE)" >> $GITHUB_OUTPUT
-        
-      - name: Deploy to EC2 - Stop Services
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: ${{ secrets.EC2_HOST }}
-          username: ${{ secrets.EC2_USERNAME }}
-          key: ${{ secrets.EC2_SSH_KEY }}
-          passphrase: ${{ secrets.SSH_PASSPHRASE }}
-          timeout: 60s
-          command_timeout: 5m
-          script: |
-            set -e
-            
-            echo "🔍 System Information:"
-            echo "Current user: $(whoami)"
-            echo "Current directory: $(pwd)"
-            echo "Available memory:"
-            free -h
-            echo "Disk space:"
-            df -h
-            
-            echo "☕ Java version check:"
-            java -version 2>&1 || echo "Java not found"
-            
-            echo "⏹️ Stopping existing application..."
-            
-            # Check if app.pid exists and stop the process
-            if [ -f "/home/deploy/app.pid" ]; then
-              OLD_PID=$(cat /home/deploy/app.pid)
-              if kill -0 $OLD_PID 2>/dev/null; then
-                echo "🛑 Stopping application with PID: $OLD_PID"
-                kill -TERM $OLD_PID
-                sleep 10
-                # Force kill if still running
-                if kill -0 $OLD_PID 2>/dev/null; then
-                  echo "⚡ Force killing application"
-                  kill -KILL $OLD_PID
-                fi
+          
+          # Set Docker Compose command
+          if docker compose version &> /dev/null; then
+              DOCKER_COMPOSE="docker compose"
+          else
+              DOCKER_COMPOSE="docker-compose"
+          fi
+          
+          print_status "Using: $DOCKER_COMPOSE"
+          
+          # Stop existing containers gracefully
+          print_status "Stopping existing containers..."
+          $DOCKER_COMPOSE down --timeout 30 || true
+          
+          # Clean up old containers and images
+          print_status "Cleaning up old resources..."
+          docker container prune -f || true
+          docker image prune -f || true
+          
+          # Create backup of database if it exists
+          if docker volume ls | grep -q "postgres_data"; then
+              print_status "Creating database backup..."
+              docker run --rm -v postgres_data:/data -v $(pwd):/backup alpine:latest \
+                tar czf /backup/postgres_backup_$(date +%Y%m%d_%H%M%S).tar.gz -C /data . || true
+          fi
+          
+          # Build and start services
+          print_status "Building and starting services..."
+          $DOCKER_COMPOSE build --no-cache
+          $DOCKER_COMPOSE up -d
+          
+          # Wait for database to be ready
+          print_status "Waiting for database to be ready..."
+          for i in {1..30}; do
+              if docker exec notifications-db pg_isready -U batch_user -d notifications >/dev/null 2>&1; then
+                  print_status "Database is ready! ✅"
+                  break
               fi
-              rm -f /home/deploy/app.pid
-            fi
-            
-            # Stop any remaining Java processes
-            pkill -f "java.*\.jar" || echo "No existing JAR process found"
-            
-            # Kill any process using port 8080
-            PORT_PID=$(lsof -ti:8080 2>/dev/null || echo "")
-            if [ ! -z "$PORT_PID" ]; then
-              echo "🔌 Killing process on port 8080: $PORT_PID"
-              kill -9 $PORT_PID
-            fi
-            
-            sleep 5
-            
-            echo "💾 Creating backup..."
-            mkdir -p /home/deploy/backups
-            if [ -f "/home/deploy/app.jar" ]; then
-              BACKUP_FILE="/home/deploy/backups/app-backup-$(date +%Y%m%d-%H%M%S).jar"
-              cp /home/deploy/app.jar "$BACKUP_FILE"
-              echo "✅ Backup created: $BACKUP_FILE"
+              echo "Waiting for database... ($i/30)"
+              sleep 5
+          done
+          
+          # Wait for application to start
+          print_status "Waiting for application to start..."
+          for i in {1..36}; do
+              if curl -f -s http://localhost:8080/actuator/health >/dev/null 2>&1; then
+                  print_status "Application is healthy! ✅"
+                  break
+              fi
+              echo "Waiting for application... ($i/36)"
+              sleep 10
               
-              # Keep only last 5 backups
-              cd /home/deploy/backups
-              ls -t app-backup-*.jar | tail -n +6 | xargs rm -f 2>/dev/null || true
-            else
-              echo "ℹ️ No existing application to backup"
-            fi
-            
-            echo "📁 Preparing deployment directory..."
-            mkdir -p /home/deploy
-            cd /home/deploy
-            
-            # Clean up old logs
-            if [ -f "application.log" ]; then
-              mv application.log "application-$(date +%Y%m%d-%H%M%S).log"
-            fi
-            
-            echo "⚙️ Creating application configuration..."
-            cat > application.properties << 'EOF'
-            # Database Configuration
-            spring.datasource.url=jdbc:postgresql://localhost:5432/notifications
-            spring.datasource.username=batch_user
-            spring.datasource.password=${{ secrets.DB_PASSWORD }}
-            spring.datasource.driver-class-name=org.postgresql.Driver
-            
-            # JPA Configuration
-            spring.jpa.hibernate.ddl-auto=update
-            spring.jpa.show-sql=false
-            spring.jpa.properties.hibernate.format_sql=true
-            spring.jpa.database-platform=org.hibernate.dialect.PostgreSQLDialect
-            
-            # Server Configuration
-            server.port=8080
-            server.servlet.context-path=/
-            
-            # Actuator Configuration
-            management.endpoints.web.exposure.include=health,info,env,metrics
-            management.endpoint.health.show-details=always
-            management.server.port=8081
-            
-            # Logging Configuration
-            logging.level.root=INFO
-            logging.level.org.springframework=INFO
-            logging.level.org.springframework.web=DEBUG
-            logging.file.name=/home/deploy/application.log
-            logging.pattern.file=%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level %logger{36} - %msg%n
-            logging.pattern.console=%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level %logger{36} - %msg%n
-            
-            # JVM Configuration
-            spring.jpa.open-in-view=false
-            EOF
-            
-            echo "✅ Configuration created successfully"
-            echo "📋 Configuration file contents:"
-            cat application.properties | grep -v password
-            
-      - name: Copy JAR to EC2
+              # Show progress every 6 attempts (1 minute)
+              if [ $((i % 6)) -eq 0 ]; then
+                  print_status "Application logs (last 10 lines):"
+                  docker logs notifications-app --tail 10 || true
+              fi
+          done
+          
+          # Final health check
+          if curl -f -s http://localhost:8080/actuator/health >/dev/null 2>&1; then
+              print_status "🎉 Deployment completed successfully!"
+              echo "📊 Final status:"
+              $DOCKER_COMPOSE ps
+              echo ""
+              echo "🏥 Health check:"
+              curl -s http://localhost:8080/actuator/health | python3 -c "import sys, json; print(json.dumps(json.load(sys.stdin), indent=2))" || curl -s http://localhost:8080/actuator/health
+          else
+              print_error "❌ Application failed to start properly"
+              print_error "📋 Final logs:"
+              docker logs notifications-app --tail 50
+              exit 1
+          fi
+          EOF
+          
+          chmod +x deploy.sh
+
+      - name: 📤 Copy files to EC2
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.EC2_HOST }}
           username: ${{ secrets.EC2_USERNAME }}
           key: ${{ secrets.EC2_SSH_KEY }}
           passphrase: ${{ secrets.SSH_PASSPHRASE }}
-          source: ${{ steps.jar.outputs.jar_file }}
-          target: /home/deploy/
-          timeout: 60s
-          debug: false
+          source: "./*"
+          target: "~/app/"
+          timeout: 120s
           overwrite: true
-          
-      - name: Start Application
+
+      - name: 🚀 Deploy to EC2
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USERNAME }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          passphrase: ${{ secrets.SSH_PASSPHRASE }}
+          timeout: 300s
+          command_timeout: 20m
+          script: |
+            set -e
+            
+            echo "🚀 Starting deployment on EC2..."
+            echo "Current user: $(whoami)"
+            echo "Current directory: $(pwd)"
+            echo "Deployment time: $(date)"
+            
+            # Navigate to deployment directory
+            cd ~/app
+            
+            # Show what was copied
+            echo "📁 Deployment directory contents:"
+            ls -la
+            
+            # Run deployment script
+            echo "🏃 Running deployment script..."
+            bash deploy.sh
+            
+            echo "✅ EC2 deployment completed!"
+
+      - name: 🏥 Final Health Check
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.EC2_HOST }}
@@ -190,132 +256,75 @@ jobs:
           key: ${{ secrets.EC2_SSH_KEY }}
           passphrase: ${{ secrets.SSH_PASSPHRASE }}
           timeout: 60s
-          command_timeout: 10m
           script: |
-            set -e
-            cd /home/deploy
+            echo "🏥 Performing final health checks..."
             
-            echo "📋 Checking deployment directory..."
-            ls -la /home/deploy/
-            
-            echo "🔍 Looking for JAR file..."
-            # Find the uploaded JAR file
-            JAR_FILE=$(find /home/deploy -maxdepth 2 -name "*.jar" -not -path "*/backups/*" | head -1)
-            
-            if [ -z "$JAR_FILE" ]; then
-              echo "❌ No JAR file found in deployment directory!"
-              echo "Directory contents:"
-              find /home/deploy -type f -name "*.jar" 2>/dev/null || echo "No JAR files found"
-              exit 1
+            # Check container status
+            cd ~/app
+            if docker compose version &> /dev/null; then
+                DOCKER_COMPOSE="docker compose"
+            else
+                DOCKER_COMPOSE="docker-compose"
             fi
             
-            echo "✅ Found JAR file: $JAR_FILE"
+            echo "📊 Container Status:"
+            $DOCKER_COMPOSE ps
             
-            # Rename to app.jar for consistency
-            if [ "$(basename $JAR_FILE)" != "app.jar" ]; then
-              echo "📝 Renaming JAR to app.jar..."
-              mv "$JAR_FILE" app.jar
-            fi
-            
-            echo "📊 JAR file info:"
-            ls -lh app.jar
-            file app.jar
-            
-            # Verify JAR integrity
-            jar tf app.jar > /dev/null && echo "✅ JAR file is valid" || {
-              echo "❌ JAR file is corrupted"
-              exit 1
-            }
-            
-            echo "🚀 Starting application..."
-            
-            # Create startup script for better process management
-            cat > start_app.sh << 'EOF_SCRIPT'
-            #!/bin/bash
-            cd /home/deploy
-            
-            # Set JVM options for better performance
-            export JAVA_OPTS="-Xms512m -Xmx1024m -XX:+UseG1GC -XX:G1HeapRegionSize=16m -XX:+UseStringDeduplication"
-            
-            # Start the application
-            exec java $JAVA_OPTS \
-              -jar app.jar \
-              --spring.config.location=file:./application.properties \
-              --server.port=8080 \
-              --logging.file.name=./application.log
-            EOF_SCRIPT
-            
-            chmod +x start_app.sh
-            
-            # Start the application in background
-            nohup ./start_app.sh > startup.log 2>&1 &
-            APP_PID=$!
-            
-            echo "📋 Application started with PID: $APP_PID"
-            echo $APP_PID > app.pid
-            
-            echo "⏳ Waiting for application to start..."
-            sleep 15
-            
-            # Check if process is still running
-            if ! kill -0 $APP_PID 2>/dev/null; then
-              echo "❌ Application process died immediately!"
-              echo "📋 Startup logs:"
-              cat startup.log 2>/dev/null || echo "No startup log found"
-              echo "📋 Application logs:"
-              tail -n 50 application.log 2>/dev/null || echo "No application log found"
-              exit 1
-            fi
-            
-            # Health check loop
-            for i in {1..24}; do
-              echo "🔍 Health check attempt $i/24 ($(date))..."
-              sleep 15
-              
-              # Check if process is still running
-              if ! kill -0 $APP_PID 2>/dev/null; then
-                echo "❌ Application process died during startup!"
-                echo "📋 Application logs:"
-                tail -n 100 application.log 2>/dev/null || echo "No application log found"
-                exit 1
-              fi
-              
-              # Check health endpoint
-              if curl -f -m 10 http://localhost:8080/actuator/health 2>/dev/null; then
-                echo "✅ Application started successfully!"
-                echo "📊 Application health status:"
-                curl -s http://localhost:8080/actuator/health | python3 -m json.tool 2>/dev/null || curl -s http://localhost:8080/actuator/health
+            echo ""
+            echo "🏥 Application Health:"
+            if curl -f -s http://localhost:8080/actuator/health; then
                 echo ""
-                echo "📊 System resources after startup:"
-                free -h
-                echo "🎉 Deployment completed successfully!"
-                exit 0
-              else
-                echo "⌛ Application not ready yet... (attempt $i/24)"
-                if [ $((i % 6)) -eq 0 ]; then
-                  echo "📋 Progress check - last 20 lines of log:"
-                  tail -n 20 application.log 2>/dev/null || echo "No application log yet"
-                fi
-              fi
-            done
+                echo "✅ Application is healthy and responding!"
+            else
+                echo "❌ Application health check failed"
+                exit 1
+            fi
             
-            echo "❌ Application failed to start within 6 minutes"
-            echo "📋 Final application logs (last 200 lines):"
-            tail -n 200 application.log 2>/dev/null || echo "No application log found"
             echo ""
-            echo "📋 Startup logs:"
-            cat startup.log 2>/dev/null || echo "No startup log found"
+            echo "📈 Resource Usage:"
+            docker stats --no-stream --format "table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}"
+            
             echo ""
-            echo "📊 System resources:"
-            free -h
-            df -h
-            echo ""
-            echo "🔍 Process status:"
-            ps aux | grep -E "(java|app)" | grep -v grep
-            echo ""
-            echo "🌐 Network status:"
-            netstat -tulpn | grep :8080 || echo "Port 8080 not in use"
-            echo ""
-            echo "📂 Directory contents:"
-            ls -la /home/deploy/
-            exit 1
+            echo "🎉 Deployment verification completed successfully!"
+
+      - name: 📧 Notify on Success
+        if: success()
+        run: |
+          echo "✅ Deployment completed successfully!"
+          echo "🔗 Application URL: http://${{ secrets.EC2_HOST }}:8080"
+          echo "🏥 Health Check: http://${{ secrets.EC2_HOST }}:8080/actuator/health"
+
+      - name: 📧 Notify on Failure
+        if: failure()
+        run: |
+          echo "❌ Deployment failed!"
+          echo "Please check the logs above for error details."
+
+  cleanup:
+    needs: [build-and-deploy]
+    runs-on: ubuntu-latest
+    name: 🧹 Cleanup
+    if: always()
+    
+    steps:
+      - name: 🧹 Cleanup EC2 resources
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USERNAME }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          passphrase: ${{ secrets.SSH_PASSPHRASE }}
+          timeout: 60s
+          script: |
+            echo "🧹 Cleaning up old Docker resources..."
+            
+            # Remove old backup containers (keep last 3)
+            docker ps -a --filter "name=notifications-app-backup" --format "{{.Names}}" | sort -r | tail -n +4 | xargs -r docker rm -f || true
+            
+            # Clean up unused resources
+            docker system prune -f --volumes || true
+            
+            # Clean up old backups (keep last 5)
+            cd ~/app && ls -t postgres_backup_*.tar.gz 2>/dev/null | tail -n +6 | xargs -r rm -f || true
+            
+            echo "✅ Cleanup completed!"

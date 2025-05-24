@@ -1,0 +1,27 @@
+{"properties": [
+  {
+    "name": "management.endpoint.health.show-details",
+    "type": "java.lang.String",
+    "description": "A description for 'management.endpoint.health.show-details'"
+  },
+  {
+    "name": "management.endpoints.web.exposure.include",
+    "type": "java.lang.String",
+    "description": "A description for 'management.endpoints.web.exposure.include'"
+  },
+  {
+    "name": "management.endpoint.health.probes.enabled",
+    "type": "java.lang.String",
+    "description": "A description for 'management.endpoint.health.probes.enabled'"
+  },
+  {
+    "name": "management.health.db.enabled",
+    "type": "java.lang.String",
+    "description": "A description for 'management.health.db.enabled'"
+  },
+  {
+    "name": "management.health.ping.enabled",
+    "type": "java.lang.String",
+    "description": "A description for 'management.health.ping.enabled'"
+  }
+]}
