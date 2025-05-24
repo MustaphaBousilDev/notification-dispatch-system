@@ -1,4 +1,4 @@
-name: Docker CI/CD Pipelines
+name: Docker CI/CD Pipeliness
 
 on:
   push:
