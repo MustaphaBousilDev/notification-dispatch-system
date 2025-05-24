@@ -258,17 +258,60 @@ jobs:
           
           chmod +x deploy.sh
 
-      - name: 📤 Copy files to EC2
-        uses: appleboy/scp-action@v0.1.7
+      - name: 🔍 Validate SSH Configuration
+        run: |
+          echo "## 🔍 SSH Configuration Check" >> $GITHUB_STEP_SUMMARY
+          
+          # Check if required secrets are set (without exposing values)
+          if [ -z "${{ secrets.EC2_HOST }}" ]; then
+            echo "❌ **EC2_HOST secret is not set**" >> $GITHUB_STEP_SUMMARY
+            exit 1
+          fi
+          
+          if [ -z "${{ secrets.EC2_USERNAME }}" ]; then
+            echo "❌ **EC2_USERNAME secret is not set**" >> $GITHUB_STEP_SUMMARY
+            exit 1
+          fi
+          
+          if [ -z "${{ secrets.EC2_SSH_KEY }}" ]; then
+            echo "❌ **EC2_SSH_KEY secret is not set**" >> $GITHUB_STEP_SUMMARY
+            exit 1
+          fi
+          
+          echo "✅ **All SSH secrets are configured**" >> $GITHUB_STEP_SUMMARY
+
+      # Step 2: Test SSH connection first
+      - name: 🔍 Test SSH Connection
+        uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.EC2_HOST }}
           username: ${{ secrets.EC2_USERNAME }}
           key: ${{ secrets.EC2_SSH_KEY }}
-          passphrase: ${{ secrets.SSH_PASSPHRASE }}
+          timeout: 30s
+          script: |
+            echo "✅ SSH connection successful!"
+            echo "👤 Current user: $(whoami)"
+            echo "🏠 Home directory: $HOME"
+            echo "📁 Current directory: $(pwd)"
+            
+            # Prepare deployment directory
+            mkdir -p ~/app
+            echo "📁 Deployment directory prepared"
+
+      - name: 📤 Copy files to EC2
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.EC2_HOST || '13.219.90.34' }}
+          username: ${{ secrets.EC2_USERNAME || 'deploy' }}
+          key: ${{ secrets.EC2_SSH_KEY || '' }}
+          port: 22
           source: "./*"
           target: "~/app/"
           timeout: 180s
           overwrite: true
+          debug: true
+          strip_components: 0
+          use_insecure_cipher: false
 
       - name: 🚀 Deploy to EC2
         id: deploy
@@ -277,7 +320,6 @@ jobs:
           host: ${{ secrets.EC2_HOST }}
           username: ${{ secrets.EC2_USERNAME }}
           key: ${{ secrets.EC2_SSH_KEY }}
-          passphrase: ${{ secrets.SSH_PASSPHRASE }}
           timeout: 300s
           command_timeout: 25m
           script: |
@@ -314,7 +356,6 @@ jobs:
           host: ${{ secrets.EC2_HOST }}
           username: ${{ secrets.EC2_USERNAME }}
           key: ${{ secrets.EC2_SSH_KEY }}
-          passphrase: ${{ secrets.SSH_PASSPHRASE }}
           timeout: 120s
           script: |
             echo "🏥 Performing final health checks and setting up monitoring..."
@@ -413,7 +454,6 @@ jobs:
           host: ${{ secrets.EC2_HOST }}
           username: ${{ secrets.EC2_USERNAME }}
           key: ${{ secrets.EC2_SSH_KEY }}
-          passphrase: ${{ secrets.SSH_PASSPHRASE }}
           timeout: 90s
           script: |
             echo "🧹 Starting cleanup of old Docker resources..."
