@@ -305,7 +305,7 @@ jobs:
           username: ${{ secrets.EC2_USERNAME || 'deploy' }}
           key: ${{ secrets.EC2_SSH_KEY || '' }}
           port: 22
-          source: "./*"
+          source: ".env,deploy.sh,app/,docker-compose.yaml,Dockerfile"
           target: "~/app/"
           timeout: 180s
           overwrite: true
