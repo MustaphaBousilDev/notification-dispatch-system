@@ -6,6 +6,12 @@ on:
   pull_request:
     branches: [main, master]
 
+# Add permissions for the workflow
+permissions:
+  contents: read
+  checks: write
+  pull-requests: write
+
 env:
   IMAGE_NAME: notifications-app
   CONTAINER_NAME: notifications-app
@@ -43,13 +49,25 @@ jobs:
         run: ./gradlew test
         working-directory: ./app
         
-      - name: 📊 Publish test results
-        uses: dorny/test-reporter@v1
-        if: success() || failure()
+      - name: 📊 Upload test results
+        uses: actions/upload-artifact@v3
+        if: always()
         with:
-          name: 'Test Results'
-          path: 'app/build/test-results/test/*.xml'
-          reporter: java-junit
+          name: test-results
+          path: |
+            app/build/test-results/
+            app/build/reports/
+
+      - name: 📋 Test Summary
+        run: |
+          echo "## 🧪 Test Results" >> $GITHUB_STEP_SUMMARY
+          if [ -f "app/build/test-results/test/TEST-*.xml" ]; then
+            echo "✅ Tests completed successfully!" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "📁 Test artifacts uploaded for detailed review." >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ No test results found!" >> $GITHUB_STEP_SUMMARY
+          fi
 
   build-and-deploy:
     needs: test
@@ -87,17 +105,20 @@ jobs:
 
       - name: 🔍 Verify JAR and PostgreSQL driver
         run: |
-          echo "📋 Checking built JAR files..."
-          ls -la ./app/build/libs/
+          echo "## 🔍 Build Verification" >> $GITHUB_STEP_SUMMARY
+          echo "📋 Checking built JAR files..." | tee -a $GITHUB_STEP_SUMMARY
+          ls -la ./app/build/libs/ | tee -a $GITHUB_STEP_SUMMARY
           
-          echo "🔍 Verifying PostgreSQL driver is included..."
-          jar tf ./app/build/libs/*.jar | grep postgresql || {
-            echo "❌ PostgreSQL driver not found in JAR!"
-            echo "📋 JAR contents preview:"
-            jar tf ./app/build/libs/*.jar | head -20
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "🔍 Verifying PostgreSQL driver is included..." | tee -a $GITHUB_STEP_SUMMARY
+          if jar tf ./app/build/libs/*.jar | grep postgresql >/dev/null; then
+            echo "✅ PostgreSQL driver found in JAR" | tee -a $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ PostgreSQL driver not found in JAR!" | tee -a $GITHUB_STEP_SUMMARY
+            echo "📋 JAR contents preview:" | tee -a $GITHUB_STEP_SUMMARY
+            jar tf ./app/build/libs/*.jar | head -20 | tee -a $GITHUB_STEP_SUMMARY
             exit 1
-          }
-          echo "✅ PostgreSQL driver found in JAR"
+          fi
 
       - name: 📋 Create deployment files
         run: |
@@ -219,6 +240,7 @@ jobs:
           overwrite: true
 
       - name: 🚀 Deploy to EC2
+        id: deploy
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.EC2_HOST }}
@@ -287,24 +309,29 @@ jobs:
             echo ""
             echo "🎉 Deployment verification completed successfully!"
 
-      - name: 📧 Notify on Success
-        if: success()
+      - name: 📊 Deployment Summary
+        if: always()
         run: |
-          echo "✅ Deployment completed successfully!"
-          echo "🔗 Application URL: http://${{ secrets.EC2_HOST }}:8080"
-          echo "🏥 Health Check: http://${{ secrets.EC2_HOST }}:8080/actuator/health"
-
-      - name: 📧 Notify on Failure
-        if: failure()
-        run: |
-          echo "❌ Deployment failed!"
-          echo "Please check the logs above for error details."
+          echo "## 🚀 Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ steps.deploy.outcome }}" == "success" ]; then
+            echo "✅ **Deployment Status**: SUCCESS" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "🔗 **Application URL**: http://${{ secrets.EC2_HOST }}:8080" >> $GITHUB_STEP_SUMMARY
+            echo "🏥 **Health Check**: http://${{ secrets.EC2_HOST }}:8080/actuator/health" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "**Deployment completed at**: $(date -u)" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ **Deployment Status**: FAILED" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Please check the logs above for error details." >> $GITHUB_STEP_SUMMARY
+          fi
 
   cleanup:
     needs: [build-and-deploy]
     runs-on: ubuntu-latest
     name: 🧹 Cleanup
-    if: always()
+    if: always() && needs.build-and-deploy.result == 'success'
     
     steps:
       - name: 🧹 Cleanup EC2 resources
@@ -321,8 +348,8 @@ jobs:
             # Remove old backup containers (keep last 3)
             docker ps -a --filter "name=notifications-app-backup" --format "{{.Names}}" | sort -r | tail -n +4 | xargs -r docker rm -f || true
             
-            # Clean up unused resources
-            docker system prune -f --volumes || true
+            # Clean up unused resources (but keep volumes)
+            docker system prune -f || true
             
             # Clean up old backups (keep last 5)
             cd ~/app && ls -t postgres_backup_*.tar.gz 2>/dev/null | tail -n +6 | xargs -r rm -f || true
