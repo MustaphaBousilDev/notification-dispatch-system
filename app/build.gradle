@@ -26,15 +26,16 @@ repositories {
 dependencies {
     implementation 'org.springframework.boot:spring-boot-starter-data-jpa'
     implementation 'org.springframework.boot:spring-boot-starter-batch'
-    implementation 'org.springframework.boot:spring-boot-starter-data-jpa'
     implementation 'org.springframework.boot:spring-boot-starter-web'
     implementation 'org.springframework.boot:spring-boot-starter-actuator'
     implementation 'org.springframework.kafka:spring-kafka'
+    
+    // PostgreSQL driver - EXPLICIT version for guaranteed inclusion
     implementation 'org.postgresql:postgresql:42.7.3'
+    
     compileOnly 'org.projectlombok:lombok'
-    implementation 'jakarta.persistence:jakarta.persistence-api:3.1.0'  // For Spring Boot 3.x
-    //runtimeOnly 'org.postgresql:postgresql'
     annotationProcessor 'org.projectlombok:lombok'
+    
     testImplementation 'org.springframework.boot:spring-boot-starter-test'
     testImplementation 'org.springframework.batch:spring-batch-test'
     testImplementation 'org.springframework.kafka:spring-kafka-test'
@@ -43,4 +44,36 @@ dependencies {
 
 tasks.named('test') {
     useJUnitPlatform()
+}
+
+// Disable the plain JAR to avoid confusion
+jar {
+    enabled = false
+}
+
+// Optional: Add verification task for local testing
+tasks.register('verifyPostgreSQL') {
+    dependsOn bootJar
+    doLast {
+        def bootJarFile = bootJar.outputs.files.singleFile
+        println "=== Checking JAR: ${bootJarFile.name} ==="
+        println "JAR size: ${bootJarFile.length() / 1024 / 1024} MB"
+        
+        def jarCommand = ["jar", "tf", bootJarFile.absolutePath]
+        def proc = jarCommand.execute()
+        def output = proc.text
+        
+        def pgFiles = output.split('\n').findAll { it.contains('postgresql') }
+        
+        if (pgFiles.size() > 0) {
+            println "✅ PostgreSQL driver found! (${pgFiles.size()} files)"
+            println "Sample PostgreSQL files:"
+            pgFiles.take(5).each { println "  - $it" }
+        } else {
+            println "❌ PostgreSQL driver NOT found!"
+            println "First 20 entries in JAR:"
+            output.split('\n').take(20).each { println "  - $it" }
+            throw new GradleException("PostgreSQL driver missing from JAR")
+        }
+    }
 }
