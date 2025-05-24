@@ -1,4 +1,4 @@
-name: Docker CI/CD Pipelinef
+name: Docker CI/CD Pipelinefs
 
 on:
   push:
