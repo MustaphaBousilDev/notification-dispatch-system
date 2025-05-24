@@ -124,7 +124,7 @@ jobs:
           cat > .env << EOF
           DB_PASSWORD=${{ secrets.DB_PASSWORD }}
           SPRING_PROFILE=production
-          DEPLOYMENT_TIME=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          DEPLOYMENT_TIME="$(date -u +"%Y-%m-%d %H:%M:%S UTC")"
           GIT_COMMIT=${{ github.sha }}
           GIT_BRANCH=${{ github.ref_name }}
           EOF
