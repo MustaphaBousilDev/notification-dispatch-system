@@ -23,5 +23,15 @@
     "name": "management.health.ping.enabled",
     "type": "java.lang.String",
     "description": "A description for 'management.health.ping.enabled'"
+  },
+  {
+    "name": "app.version",
+    "type": "java.lang.String",
+    "description": "A description for 'app.version'"
+  },
+  {
+    "name": "app.description",
+    "type": "java.lang.String",
+    "description": "A description for 'app.description'"
   }
 ]}
