@@ -118,7 +118,7 @@ jobs:
             exit 1
           fi
 
-      - name: 📋 Create deployment files
+      - name: 📋 Create deployment  files
         run: |
           # Create environment file for deployment
           cat > .env << EOF
