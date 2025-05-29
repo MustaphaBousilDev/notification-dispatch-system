@@ -123,10 +123,11 @@ jobs:
           # Create environment file for deployment
           cat > .env << EOF
           DB_PASSWORD=${{ secrets.DB_PASSWORD }}
-          SPRING_PROFILE=production
+          SPRING_PROFILES_ACTIVE=docker
           DEPLOYMENT_TIME="$(date -u +"%Y-%m-%d %H:%M:%S UTC")"
           GIT_COMMIT=${{ github.sha }}
           GIT_BRANCH=${{ github.ref_name }}
+          BUILD_NUMBER=${{ github.run_number }}
           EOF
           
           # Create deployment script
@@ -134,10 +135,11 @@ jobs:
           #!/bin/bash
           set -e
           
-          echo "🐳 Starting Docker deployment process..."
+          echo "🐳 Starting Docker deployment with profile system..."
           echo "📅 Deployment Time: $(date)"
-          echo "🔗 Git Commit: $GIT_COMMIT"
-          echo "🌿 Git Branch: $GIT_BRANCH"
+          echo "🔗 Git Commit: ${GIT_COMMIT:-unknown}"
+          echo "🌿 Git Branch: ${GIT_BRANCH:-unknown}"
+          echo "📋 Build Number: ${BUILD_NUMBER:-unknown}"
           
           # Colors for output
           GREEN='\033[0;32m'
@@ -150,6 +152,13 @@ jobs:
           print_warning() { echo -e "${YELLOW}[WARNING]${NC} $1"; }
           print_error() { echo -e "${RED}[ERROR]${NC} $1"; }
           print_step() { echo -e "${BLUE}[STEP]${NC} $1"; }
+
+          # Load environment variables
+          if [ -f .env ]; then
+              source .env
+              print_status "Environment variables loaded"
+              print_status "Active Profile: ${SPRING_PROFILES_ACTIVE:-docker}"
+          fi
           
           # Check Docker is available
           if ! command -v docker &> /dev/null; then
@@ -169,9 +178,9 @@ jobs:
           # Show current system status
           print_step "System Status Check"
           echo "💾 Disk Space:"
-          df -h /
+          df -h / | head -2
           echo "🧠 Memory:"
-          free -h
+          free -h | head -2
           echo "🐳 Docker Info:"
           docker system df
           
@@ -182,19 +191,37 @@ jobs:
           # Create backup of database if it exists
           if docker volume ls | grep -q "postgres_data"; then
               print_step "Creating database backup..."
+              BACKUP_NAME="postgres_backup_$(date +%Y%m%d_%H%M%S).tar.gz"
               docker run --rm -v postgres_data:/data -v $(pwd):/backup alpine:latest \
                 tar czf /backup/postgres_backup_$(date +%Y%m%d_%H%M%S).tar.gz -C /data . || true
               print_status "Database backup created"
           fi
           
-          # Clean up old resources
+          # Clean up old resources (but preserve recent ones)
           print_step "Cleaning up old resources..."
-          docker container prune -f || true
-          docker image prune -f || true
+          docker container prune -f --filter "until=24h" || true
+          docker image prune -f --filter "until=48h" || true
+
+          # Verify docker-compose.yaml exists and is valid
+          if [ ! -f docker-compose.yaml ]; then
+              print_error "docker-compose.yaml not found!"
+              exit 1
+          fi
+
+          # Validate docker-compose configuration
+          print_step "Validating Docker Compose configuration..."
+          if ! $DOCKER_COMPOSE config >/dev/null 2>&1; then
+              print_error "Invalid docker-compose.yaml configuration!"
+              $DOCKER_COMPOSE config
+              exit 1
+          fi
           
           # Build and start services
           print_step "Building and starting services..."
+          print_status "Building Docker images..."
           $DOCKER_COMPOSE build --no-cache
+
+          print_status "Starting services..."
           $DOCKER_COMPOSE up -d
           
           # Wait for database to be ready
@@ -209,6 +236,7 @@ jobs:
               
               if [ $i -eq 30 ]; then
                   print_error "Database failed to start!"
+                  echo "Database logs:"
                   docker logs notifications-db --tail 20
                   exit 1
               fi
@@ -216,12 +244,12 @@ jobs:
           
           # Wait for application to start
           print_step "Waiting for application to start..."
-          for i in {1..36}; do
+          for i in {1..40}; do
               if curl -f -s http://localhost:8080/actuator/health >/dev/null 2>&1; then
                   print_status "Application is healthy! ✅"
                   break
               fi
-              echo "Waiting for application... ($i/36)"
+              echo "Waiting for application... ($i/40)"
               sleep 10
               
               # Show progress every 6 attempts (1 minute)
@@ -230,9 +258,13 @@ jobs:
                   docker logs notifications-app --tail 10 || true
               fi
               
-              if [ $i -eq 36 ]; then
+              if [ $i -eq 40 ]; then
                   print_error "Application failed to start!"
+                  echo "Full application logs:"
                   docker logs notifications-app --tail 50
+                  echo ""
+                  echo "Container status:"
+                  $DOCKER_COMPOSE ps
                   exit 1
               fi
           done
@@ -284,8 +316,8 @@ jobs:
       - name: 🔍 Test SSH Connection
         uses: appleboy/ssh-action@v1.0.3
         with:
-          host: ${{ secrets.EC2_HOST }}
-          username: ${{ secrets.EC2_USERNAME }}
+          host: ${{ secrets.EC2_HOST || '54.88.222.134' }}
+          username: ${{ secrets.EC2_USERNAME || 'github' }}
           key: ${{ secrets.EC2_SSH_KEY }}
           timeout: 30s
           script: |
@@ -301,9 +333,9 @@ jobs:
       - name: 📤 Copy files to EC2
         uses: appleboy/scp-action@v0.1.7
         with:
-          host: ${{ secrets.EC2_HOST || '13.219.90.34' }}
-          username: ${{ secrets.EC2_USERNAME || 'deploy' }}
-          key: ${{ secrets.EC2_SSH_KEY || '' }}
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USERNAME }}
+          key: ${{ secrets.EC2_SSH_KEY }}
           port: 22
           source: ".env,deploy.sh,app/,docker-compose.yaml,Dockerfile"
           target: "~/app/"
