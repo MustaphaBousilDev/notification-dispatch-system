@@ -7,7 +7,7 @@ services:
     environment:
       POSTGRES_DB: notifications
       POSTGRES_USER: batch_user
-      POSTGRES_PASSWORD: mugiwara1032
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-mugiwara1032}
       PGDATA: /var/lib/postgresql/data/pgdata
     volumes:
       - postgres_data:/var/lib/postgresql/data
@@ -34,10 +34,12 @@ services:
         condition: service_healthy
     environment:
       # Database Configuration
+      SPRING_PROFILES_ACTIVE: docker
       SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/notifications
       SPRING_DATASOURCE_USERNAME: batch_user
-      SPRING_DATASOURCE_PASSWORD: mugiwara1032
+      SPRING_DATASOURCE_PASSWORD: ${DB_PASSWORD:-mugiwara1032}
       SPRING_DATASOURCE_DRIVER_CLASS_NAME: org.postgresql.Driver
+      
       
       # JPA Configuration
       SPRING_JPA_HIBERNATE_DDL_AUTO: update
@@ -54,7 +56,7 @@ services:
       MANAGEMENT_ENDPOINT_HEALTH_PROBES_ENABLED: true
       
       # Logging Configuration
-      LOGGING_LEVEL_ROOT: INFO
+      LOGGING_LEVEL_ROOT: ${LOG_LEVEL:-INFO}
       LOGGING_LEVEL_ORG_SPRINGFRAMEWORK: INFO
       LOGGING_LEVEL_ORG_SPRINGFRAMEWORK_BATCH: INFO
       LOGGING_FILE_NAME: /app/logs/application.log
@@ -63,8 +65,6 @@ services:
       SPRING_BATCH_JOB_ENABLED: false
       SPRING_BATCH_JDBC_INITIALIZE_SCHEMA: always
       
-      # Application Profile
-      SPRING_PROFILES_ACTIVE: production
     ports:
       - "8080:8080"
     volumes:
