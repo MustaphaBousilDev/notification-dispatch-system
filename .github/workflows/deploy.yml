@@ -1,4 +1,4 @@
-name: Docker CI/CD Pipelines
+name: Docker CI/CD Pipelines for Notification system
 
 on:
   push:
