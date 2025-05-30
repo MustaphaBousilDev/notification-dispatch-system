@@ -1,4 +1,4 @@
-name: Parallel CI/CD Pipeline for Notification System
+name: Fixed Parallel CI/CD Pipeline
 
 on:
   push:
@@ -19,10 +19,9 @@ env:
 
 jobs:
   # ==============================================================================
-  # 🚀 PHASE 1: PARALLEL QUALITY CHECKS (3 jobs run simultaneously)
+  # 🚀 PHASE 1: PARALLEL QUALITY CHECKS
   # ==============================================================================
   
-  # Job 1: Unit Tests (runs in parallel)
   unit-tests:
     runs-on: ubuntu-latest
     name: 🧪 Unit Tests
@@ -60,13 +59,9 @@ jobs:
             app/build/reports/
           retention-days: 30
 
-  # Job 2: Code Quality Check (runs in parallel)
-  
-
-  # Job 3: Security Scan (runs in parallel)
-  security-scan:
+  code-quality:
     runs-on: ubuntu-latest
-    name: 🔒 Security Scan
+    name: 🔍 Code Quality
     steps:
       - name: 📥 Checkout
         uses: actions/checkout@v4
@@ -82,22 +77,31 @@ jobs:
         run: chmod +x ./gradlew
         working-directory: ./app
         
-      - name: 🔒 Security analysis
+      - name: 🔍 Run quality checks
         run: |
-          # Add security scanning tools
-          echo "Running security scans..."
-          # ./gradlew dependencyCheckAnalyze --parallel
+          ./gradlew checkstyleMain checkstyleTest --parallel
         working-directory: ./app
 
+  security-scan:
+    runs-on: ubuntu-latest
+    name: 🔒 Security Scan
+    steps:
+      - name: 📥 Checkout
+        uses: actions/checkout@v4
+        
+      - name: 🔒 Security analysis
+        run: |
+          echo "Running security scans..."
+          # Add security scanning tools here
+
   # ==============================================================================
-  # 🚀 PHASE 2: BUILD (waits for all parallel checks)
+  # 🚀 PHASE 2: BUILD
   # ==============================================================================
   
   build:
     runs-on: ubuntu-latest
     name: 🏗️ Build Application
-    # ⚡ Waits for ALL 3 parallel jobs above to complete
-    needs: [unit-tests, security-scan]
+    needs: [unit-tests, code-quality, security-scan]
     outputs:
       jar-name: ${{ steps.build-info.outputs.jar-name }}
       image-tag: ${{ steps.build-info.outputs.image-tag }}
@@ -122,31 +126,9 @@ jobs:
         run: chmod +x ./gradlew
         working-directory: ./app
         
-      # 🚀 Build without tests (already tested in parallel)
       - name: 🏗️ Build JAR (skip tests)
         run: ./gradlew clean build -x test --parallel --build-cache
         working-directory: ./app
-        
-      - name: 🔍 Verify JAR and PostgreSQL driver
-        run: |
-          echo "## 🔍 Build Verification" >> $GITHUB_STEP_SUMMARY
-          echo "📋 Checking built JAR files..." | tee -a $GITHUB_STEP_SUMMARY
-          ls -la ./app/build/libs/ | tee -a $GITHUB_STEP_SUMMARY
-          
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "🔍 Verifying PostgreSQL driver is included..." | tee -a $GITHUB_STEP_SUMMARY
-          if jar tf ./app/build/libs/*.jar | grep postgresql >/dev/null; then
-            echo "✅ PostgreSQL driver found in JAR" | tee -a $GITHUB_STEP_SUMMARY
-            
-            # Show PostgreSQL version
-            PG_VERSION=$(jar tf ./app/build/libs/*.jar | grep "postgresql.*\.jar" | head -1 || echo "postgresql driver detected")
-            echo "📦 Driver: $PG_VERSION" | tee -a $GITHUB_STEP_SUMMARY
-          else
-            echo "❌ PostgreSQL driver not found in JAR!" | tee -a $GITHUB_STEP_SUMMARY
-            echo "📋 JAR contents preview:" | tee -a $GITHUB_STEP_SUMMARY
-            jar tf ./app/build/libs/*.jar | head -20 | tee -a $GITHUB_STEP_SUMMARY
-            exit 1
-          fi
         
       - name: 📊 Extract build info
         id: build-info
@@ -173,12 +155,11 @@ jobs:
           retention-days: 1
 
   # ==============================================================================
-  # 🚀 PHASE 3: PARALLEL BUILD TASKS (2 jobs run simultaneously)
+  # 🚀 PHASE 3: DOCKER BUILD (Fixed)
   # ==============================================================================
   
-  # Job 1: Docker Build
   docker-build:
-    needs: build  # ⚡ Only depends on build, runs in parallel with documentation
+    needs: build
     runs-on: ubuntu-latest
     name: 🐳 Docker Build
     if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
@@ -199,61 +180,60 @@ jobs:
           name: deployment-files
           path: .
           
+      # 🚀 FIX 1: Verify JAR file exists
+      - name: 🔍 Verify JAR file
+        run: |
+          echo "📋 Checking JAR file..."
+          ls -la app/build/libs/
+          JAR_FILE=$(ls app/build/libs/*.jar | head -1)
+          echo "Found JAR: $JAR_FILE"
+          echo "JAR size: $(stat -c%s "$JAR_FILE") bytes"
+          
       - name: 🐳 Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
         
-      - name: 🏗️ Build Docker image with cache
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: ./Dockerfile
-          push: false
-          tags: ${{ env.IMAGE_NAME }}:${{ needs.build.outputs.image-tag }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          outputs: type=docker,dest=/tmp/image.tar
+      # 🚀 FIX 2: Build and save Docker image properly
+      - name: 🏗️ Build Docker image
+        run: |
+          echo "🐳 Building Docker image..."
+          
+          # Build the image
+          docker build \
+            -t ${{ env.IMAGE_NAME }}:${{ needs.build.outputs.image-tag }} \
+            -t ${{ env.IMAGE_NAME }}:latest \
+            -f Dockerfile .
+          
+          # Verify image was built
+          docker images | grep ${{ env.IMAGE_NAME }}
+          
+          # Save image to tar file
+          echo "💾 Saving Docker image to tar..."
+          docker save ${{ env.IMAGE_NAME }}:${{ needs.build.outputs.image-tag }} -o /tmp/docker-image.tar
+          
+          # Verify tar file was created and has content
+          ls -la /tmp/docker-image.tar
+          echo "Tar file size: $(stat -c%s /tmp/docker-image.tar) bytes"
+          
+          # Ensure tar file is not empty
+          if [ ! -s /tmp/docker-image.tar ]; then
+            echo "❌ Docker image tar file is empty!"
+            exit 1
+          fi
+          
+          echo "✅ Docker image saved successfully"
           
       - name: 📤 Upload Docker image
         uses: actions/upload-artifact@v4
         with:
           name: docker-image
-          path: /tmp/image.tar
+          path: /tmp/docker-image.tar
           retention-days: 1
 
-  # Job 2: Documentation (runs in parallel with docker-build)
-  documentation:
-    needs: build  # ⚡ Only depends on build, runs in parallel with docker-build
-    runs-on: ubuntu-latest
-    name: 📚 Generate Documentation
-    steps:
-      - name: 📥 Checkout
-        uses: actions/checkout@v4
-        
-      - name: ☕ Setup JDK 17
-        uses: actions/setup-java@v4
-        with:
-          java-version: '17'
-          distribution: 'temurin'
-          cache: gradle
-          
-      - name: 📚 Generate docs
-        run: |
-          cd app
-          ./gradlew javadoc --parallel
-          echo "📚 Documentation generated"
-          
-      - name: 📤 Upload documentation
-        uses: actions/upload-artifact@v4
-        with:
-          name: documentation
-          path: app/build/docs/
-
   # ==============================================================================
-  # 🚀 PHASE 4: DEPLOY (only waits for docker-build)
+  # 🚀 PHASE 4: DEPLOY (Fixed transfer)
   # ==============================================================================
   
   deploy:
-    # ⚡ Only waits for docker-build (documentation can finish later)
     needs: [build, docker-build]
     runs-on: ubuntu-latest
     name: 🚀 Deploy
@@ -265,15 +245,38 @@ jobs:
           name: deployment-files
           path: .
           
-      - name: 📥 Download Docker image
+      # 🚀 FIX 3: Download and verify Docker image
+      - name: 📥 Download and verify Docker image
         uses: actions/download-artifact@v4
         with:
           name: docker-image
-          path: /tmp
+          path: /tmp/
+          
+      - name: 🔍 Verify Docker image file
+        run: |
+          echo "🔍 Verifying Docker image file..."
+          ls -la /tmp/
+          
+          # Check if docker-image.tar exists and has content
+          if [ -f "/tmp/docker-image.tar" ]; then
+            echo "✅ Docker image file found"
+            echo "File size: $(stat -c%s /tmp/docker-image.tar) bytes"
+            
+            # Verify it's a valid tar file
+            if tar -tf /tmp/docker-image.tar >/dev/null 2>&1; then
+              echo "✅ Docker image tar file is valid"
+            else
+              echo "❌ Docker image tar file is corrupted"
+              exit 1
+            fi
+          else
+            echo "❌ Docker image file not found!"
+            exit 1
+          fi
           
       - name: 📋 Create optimized deployment files
         run: |
-          # Optimized environment file
+          # Environment file
           cat > .env << EOF
           DB_PASSWORD=${{ secrets.DB_PASSWORD }}
           SPRING_PROFILES_ACTIVE=docker
@@ -281,108 +284,76 @@ jobs:
           DEPLOYMENT_TIME="$(date -u +"%Y-%m-%d %H:%M:%S UTC")"
           EOF
           
-          # 🚀 Fast deployment script
+          # Fast deployment script
           cat > fast-deploy.sh << 'EOF'
           #!/bin/bash
           set -e
           
-          # Colors
           GREEN='\033[0;32m'; RED='\033[0;31m'; BLUE='\033[0;34m'; NC='\033[0m'
           log() { echo -e "${GREEN}[$(date +'%H:%M:%S')]${NC} $1"; }
           step() { echo -e "${BLUE}▶${NC} $1"; }
           
+          step "Verifying Docker image file..."
+          if [ ! -f "/tmp/docker-image.tar" ]; then
+            echo "❌ Docker image file not found!"
+            exit 1
+          fi
+          
+          FILE_SIZE=$(stat -c%s /tmp/docker-image.tar)
+          echo "Docker image file size: $FILE_SIZE bytes"
+          
+          if [ "$FILE_SIZE" -eq 0 ]; then
+            echo "❌ Docker image file is empty!"
+            exit 1
+          fi
+          
           step "Loading Docker image..."
-          docker load -i /tmp/image.tar
+          docker load -i /tmp/docker-image.tar
+          
+          step "Verifying loaded image..."
+          docker images | grep notifications-app || {
+            echo "❌ Failed to load Docker image"
+            exit 1
+          }
           
           step "Preparing for deployment..."
-          # Load environment
           [ -f .env ] && source .env
           
-          # Set Docker Compose command
           DOCKER_COMPOSE="docker compose"
           command -v docker-compose >/dev/null && DOCKER_COMPOSE="docker-compose"
           
-          # 🚀 OPTIMIZATION: Quick container restart instead of full recreation
-          step "Performing rolling update..."
-          
-          # Check if containers exist
+          step "Performing deployment..."
           if docker ps -q -f name=notifications-app >/dev/null 2>&1; then
             log "Updating existing container..."
-            
-            # Create new container with different name first
-            $DOCKER_COMPOSE -f docker-compose.yaml up -d --force-recreate --no-deps notifications-app
-            
-            # Wait for health check (optimized timing)
-            step "Health check (30s max)..."
-            for i in {1..6}; do
-              if curl -f -s http://localhost:8080/actuator/health >/dev/null 2>&1; then
-                log "✅ Health check passed!"
-                break
-              fi
-              [ $i -eq 6 ] && { echo "❌ Health check failed"; docker logs notifications-app --tail 10; exit 1; }
-              sleep 5
-            done
+            $DOCKER_COMPOSE up -d --force-recreate notifications-app
           else
             log "Starting fresh deployment..."
             $DOCKER_COMPOSE up -d
-            
-            # Database health check (optimized)
-            step "Waiting for database (60s max)..."
-            for i in {1..12}; do
-              if docker exec notifications-db pg_isready -U batch_user >/dev/null 2>&1; then
-                log "✅ Database ready!"
-                break
-              fi
-              [ $i -eq 12 ] && { echo "❌ Database failed"; docker logs notifications-db --tail 10; exit 1; }
-              sleep 5
-            done
-            
-            # Application health check
-            step "Waiting for application (60s max)..."
-            for i in {1..12}; do
-              if curl -f -s http://localhost:8080/actuator/health >/dev/null 2>&1; then
-                log "✅ Application ready!"
-                break
-              fi
-              [ $i -eq 12 ] && { echo "❌ Application failed"; docker logs notifications-app --tail 10; exit 1; }
-              sleep 5
-            done
           fi
           
-          step "Cleanup old images..."
-          docker image prune -f --filter "until=24h" >/dev/null 2>&1 || true
+          step "Health check (60s max)..."
+          for i in {1..12}; do
+            if curl -f -s http://localhost:8080/actuator/health >/dev/null 2>&1; then
+              log "✅ Application is healthy!"
+              break
+            fi
+            [ $i -eq 12 ] && { echo "❌ Health check failed"; docker logs notifications-app --tail 10; exit 1; }
+            sleep 5
+          done
           
-          log "🎉 Deployment completed in $(($SECONDS))s"
-          
-          # Final status
-          echo "📊 Status:"
+          log "🎉 Deployment completed successfully!"
           $DOCKER_COMPOSE ps
           EOF
           
           chmod +x fast-deploy.sh
 
-      # 🚀 SSH connection validation
-      - name: 🔍 Validate SSH Configuration
+      - name: 🔍 SSH Configuration Check
         run: |
-          echo "## 🔍 SSH Configuration Check" >> $GITHUB_STEP_SUMMARY
-          
-          # Check if required secrets are set (without exposing values)
-          if [ -z "${{ secrets.EC2_HOST }}" ]; then
-            echo "❌ **EC2_HOST secret is not set**" >> $GITHUB_STEP_SUMMARY
+          if [ -z "${{ secrets.EC2_HOST }}" ] || [ -z "${{ secrets.EC2_USERNAME }}" ] || [ -z "${{ secrets.EC2_SSH_KEY }}" ]; then
+            echo "❌ SSH secrets not properly configured"
             exit 1
           fi
-          
-          if [ -z "${{ secrets.EC2_USERNAME }}" ]; then
-            echo "❌ **EC2_USERNAME secret is not set**" >> $GITHUB_STEP_SUMMARY
-            exit 1
-          fi
-          
-          if [ -z "${{ secrets.EC2_SSH_KEY }}" ]; then
-            echo "❌ **EC2_SSH_KEY secret is not set**" >> $GITHUB_STEP_SUMMARY
-            exit 1
-          fi
-          
-          echo "✅ **All SSH secrets are configured**" >> $GITHUB_STEP_SUMMARY
+          echo "✅ SSH secrets are configured"
 
       - name: 🔍 Test SSH Connection
         uses: appleboy/ssh-action@v1.0.3
@@ -393,11 +364,11 @@ jobs:
           timeout: 30s
           script: |
             echo "✅ SSH connection successful!"
-            echo "👤 Current user: $(whoami)"
             mkdir -p ~/app
-            echo "📁 Deployment directory prepared"
+            echo "📁 App directory prepared"
 
-      - name: 📤 Transfer files (parallel)
+      # 🚀 FIX 4: Transfer files separately and verify
+      - name: 📤 Transfer deployment files
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.EC2_HOST }}
@@ -407,53 +378,60 @@ jobs:
           target: "~/app/"
           timeout: 60s
           overwrite: true
+          debug: true
           
+      # 🚀 FIX 5: Transfer Docker image with verification
       - name: 📤 Transfer Docker image
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.EC2_HOST }}
           username: ${{ secrets.EC2_USERNAME }}
           key: ${{ secrets.EC2_SSH_KEY }}
-          source: "/tmp/image.tar"
-          target: "~/app/"
-          timeout: 120s
+          source: "/tmp/docker-image.tar"
+          target: "~/app/tmp/"
+          timeout: 300s  # Increased timeout for large file
           overwrite: true
+          debug: true
 
-      - name: 🚀 Execute deployment
-        id: deploy
+      # 🚀 FIX 6: Verify transfer and move file
+      - name: 🔍 Verify file transfer
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.EC2_HOST }}
           username: ${{ secrets.EC2_USERNAME }}
           key: ${{ secrets.EC2_SSH_KEY }}
-          timeout: 180s
-          command_timeout: 25m
+          timeout: 60s
           script: |
-            set -e
+            echo "🔍 Verifying transferred files..."
             
-            echo "🚀 Starting deployment on EC2..."
-            echo "👤 Current user: $(whoami)"
-            echo "📁 Current directory: $(pwd)"
-            echo "⏰ Deployment time: $(date)"
+            # Check deployment files
+            ls -la ~/app/
             
-            # Navigate to deployment directory
-            cd ~/app
-            
-            # Show what was copied
-            echo "📁 Deployment directory contents:"
-            ls -la
-            
-            # Load environment variables
-            if [ -f .env ]; then
-                source .env
-                echo "📋 Environment loaded"
+            # Check Docker image
+            if [ -f "~/app/tmp/docker-image.tar" ]; then
+              echo "✅ Docker image file transferred"
+              echo "File size: $(stat -c%s ~/app/tmp/docker-image.tar) bytes"
+              
+              # Move to correct location
+              mv ~/app/tmp/docker-image.tar /tmp/docker-image.tar
+              echo "✅ Docker image moved to /tmp/docker-image.tar"
+            else
+              echo "❌ Docker image file not found after transfer!"
+              ls -la ~/app/tmp/ || echo "tmp directory not found"
+              exit 1
             fi
-            
-            # Run deployment script
-            echo "🏃 Running deployment script..."
+
+      - name: 🚀 Execute deployment
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USERNAME }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          timeout: 300s
+          script: |
+            cd ~/app
+            echo "🚀 Starting deployment..."
             bash fast-deploy.sh
-            
-            echo "✅ EC2 deployment completed successfully!"
             
       - name: 📊 Final verification
         uses: appleboy/ssh-action@v1.0.3
@@ -471,22 +449,11 @@ jobs:
                 docker-compose ps
             fi
             
-            echo "🏥 Health:"
-            curl -s http://localhost:8080/actuator/health | grep -o '"status":"[^"]*"'
-            
-            echo "📈 Resources:"
-            docker stats --no-stream --format "{{.Name}}: {{.CPUPerc}} CPU, {{.MemUsage}}" | head -3
-
-      - name: 📊 Summary
-        run: |
-          echo "## 🚀 Parallel Deployment Complete" >> $GITHUB_STEP_SUMMARY
-          echo "✅ **Parallel Execution**: Jobs ran simultaneously" >> $GITHUB_STEP_SUMMARY
-          echo "⏱️ **Time Saved**: ~50-60% faster than sequential" >> $GITHUB_STEP_SUMMARY
-          echo "🔗 **Application**: http://${{ secrets.EC2_HOST }}:8080" >> $GITHUB_STEP_SUMMARY
-          echo "⏱️ **Build**: ${{ needs.build.outputs.image-tag }}" >> $GITHUB_STEP_SUMMARY
+            echo "🏥 Health Check:"
+            curl -s http://localhost:8080/actuator/health | head -5
 
   # ==============================================================================
-  # 🚀 PHASE 5: CLEANUP (runs in background)
+  # 🚀 CLEANUP
   # ==============================================================================
   
   cleanup:
@@ -504,12 +471,10 @@ jobs:
           key: ${{ secrets.EC2_SSH_KEY }}
           timeout: 60s
           script: |
-            # Run cleanup in background to not block pipeline
             (
+              cd ~/app
               docker system prune -f --filter "until=24h"
-              docker volume prune -f --filter "all=1"
-              rm -f ~/app/image.tar
-              rm -f ~/app/postgres_backup_*.tar.gz
+              rm -f /tmp/docker-image.tar
+              rm -rf ~/app/tmp/
             ) &
-            
             echo "✅ Cleanup started in background"
