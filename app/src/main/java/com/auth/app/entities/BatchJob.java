@@ -29,7 +29,7 @@ import jakarta.persistence.*;
 @AllArgsConstructor
 @Builder
 @ToString(exclude = "executions")
-public class BatchJob {
+public class BatchJob extends BaseEntity {
     @NotBlank(message = "Job name is required")
     @Size(max = 100, message = "Job name cannot exceed 100 characters")
     @Column(name = "job_name", nullable = false, length = 100)
