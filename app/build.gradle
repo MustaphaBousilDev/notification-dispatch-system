@@ -30,12 +30,22 @@ dependencies {
     implementation 'org.springframework.boot:spring-boot-starter-actuator'
     implementation 'org.springframework.kafka:spring-kafka'
     
+    // Jakarta Bean Validation + implementation
+    implementation 'jakarta.validation:jakarta.validation-api:3.0.2'
+    implementation 'org.hibernate.validator:hibernate-validator:8.0.1.Final'
+
+
     // PostgreSQL driver - EXPLICIT version for guaranteed inclusion
     implementation 'org.postgresql:postgresql:42.7.3'
     
+    // Lomlok
     compileOnly 'org.projectlombok:lombok'
     annotationProcessor 'org.projectlombok:lombok'
+
+
+    implementation 'com.h2database:h2'
     
+    //Testing
     testImplementation 'org.springframework.boot:spring-boot-starter-test'
     testImplementation 'org.springframework.batch:spring-batch-test'
     testImplementation 'org.springframework.kafka:spring-kafka-test'
