@@ -1,5 +1,4 @@
 package com.auth.app.entities;
-import lombok.Data;
 import jakarta.persistence.*;
 import lombok.Getter;
 import lombok.Setter;
