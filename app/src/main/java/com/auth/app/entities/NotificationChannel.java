@@ -1,8 +1,14 @@
 package com.auth.app.entities;
 
+import java.util.ArrayList;
+import java.util.List;
+
+import jakarta.persistence.CascadeType;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
+import jakarta.persistence.FetchType;
 import jakarta.persistence.Index;
+import jakarta.persistence.OneToMany;
 import jakarta.persistence.Table;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
@@ -48,5 +54,12 @@ public class NotificationChannel extends BaseEntity {
     private Boolean isActive = true;
     
     // Relationships
+    @OneToMany(mappedBy = "channel", cascade = CascadeType.ALL, fetch = FetchType.LAZY)
+    @Builder.Default
+    private List<NotificationType> notificationTypes = new ArrayList<>();
+
+    @OneToMany(mappedBy = "channel", cascade = CascadeType.ALL , fetch = FetchType.LAZY)
+    @Builder.Default
+    private List<NotificationPreference> preferences = new ArrayList<>();
     
 }
